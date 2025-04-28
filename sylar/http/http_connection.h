@@ -10,6 +10,7 @@
 
 #include "sylar/streams/socket_stream.h"
 #include "sylar/thread.h"
+#include "sylar/mutex.h"
 #include "sylar/uri.h"
 #include "http.h"
 
@@ -17,6 +18,7 @@
 #include <list>
 #include <string>
 #include <memory>
+#include <atomic>
 #include <stdint.h>
 
 namespace sylar {
@@ -127,7 +129,85 @@ public:
 };
 
 
+//该类是Http连接池，用来统一管理、复用、维护一批HTTP链接，避免每次请求都新建连接，提高性能，节省资源
+//前提是HTTP请求服务器和客户端都支持连接复用机制(keep-aive机制)，那么
+// 第一次建立 TCP 连接之后（socket 建好了），
+// 后续可以在这个连接上连续发送多个 HTTP 请求，
+// 只要连接有效、没有关闭，就可以从连接池拿出用一次，然后放回池子继续用，
+// 这样就省掉了反复建连接的开销（TCP三次握手、SSL握手都很重）。
+// 这就是连接池存在的意义。
+class HttpConnectionPool {
+public:
+    typedef std::shared_ptr<HttpConnectionPool> ptr;
+    typedef Mutex MutexType;
 
+    //创建一个连接池
+    static HttpConnectionPool::ptr Create(const std::string& uri, const std::string& vhost,
+                                          uint32_t max_size, uint32_t max_alive_time, uint32_t max_request);
+
+    HttpConnectionPool(const std::string& host
+                      ,const std::string& vhost
+                      ,uint32_t port
+                      ,bool is_https
+                      ,uint32_t max_size
+                      ,uint32_t max_alive_time
+                      ,uint32_t max_request);
+    
+    //从连接池中拿到一个可用的HttpConnection，如果没有可用的就创建新的连接
+    HttpConnection::ptr getConnection();
+
+    HttpResult::ptr doGet(const std::string& url, uint64_t timeout_ms, 
+                                 const std::map<std::string, std::string>& headers = {},
+                                 const std::string& body = "");
+    HttpResult::ptr doGet(Uri::ptr uri, uint64_t timeout_ms, 
+                                 const std::map<std::string, std::string>& headers = {},
+                                 const std::string& body = "");
+    //发送HTTP的POST请求
+    HttpResult::ptr doPost(const std::string& url, uint64_t timeout_ms, 
+                                  const std::map<std::string, std::string>& headers = {},
+                                  const std::string& body = "");
+    HttpResult::ptr doPost(Uri::ptr uri, uint64_t timeout_ms, 
+                                  const std::map<std::string, std::string>& headers = {},
+                                  const std::string& body = "");
+    //发送HTTP请求
+    HttpResult::ptr doRequest(HttpMethod method, const std::string& url, uint64_t timeout_ms, 
+                                  const std::map<std::string, std::string>& headers = {},
+                                  const std::string& body = "");
+    HttpResult::ptr doRequest(HttpMethod method, Uri::ptr uri, uint64_t timeout_ms, 
+                                  const std::map<std::string, std::string>& headers = {},
+                                  const std::string& body = "");
+    HttpResult::ptr doRequest(HttpRequest::ptr req, uint64_t timeout_ms);
+        
+    
+
+
+private:
+    //当一个HttpConnection(HTTP连接)用完后，不是直接销毁，而是通过ReleasePtr把它归还到连接池中或者彻底销毁
+    static void ReleasePtr(HttpConnection* ptr, HttpConnectionPool* pool); 
+private:
+    //保存远程服务器的的主机名或ip地址,比如请求 http://example.com/path，那么 m_host 就是 example.com。
+    std::string m_host;
+    //保存虚拟主机名,有些服务器（比如 Apache/Nginx）在同一个 IP 地址上跑多个网站，
+    //靠 Host 头区分，比如访问 www.site1.com 和 www.site2.com，虽然是同一个 IP，
+    //但需要发送不同的 Host。那么这里的 m_vhost 保存的就是你要访问的虚拟主机名
+    std::string m_vhost;
+    //保存目标服务器的端口号
+    uint32_t m_port;
+    //控制连接池最多可以同时拥有多少个连接
+    uint32_t m_maxSize;
+    //每一个连接最多存活多久
+    uint32_t m_maxAliveTime;
+    //单个连接最多使用多少次后强制关闭重建
+    uint32_t m_maxRequest;
+    //标记是否是加密传输
+    bool m_isHttps;
+    MutexType m_mutex;
+    //存储可用的空闲连接列表
+    std::list<HttpConnection*> m_conns;
+    //统计当前连接池中总共存在的连接数
+    //假设m_conns中有三个空闲的连接，还有两个正在使用的连接，那么m_total=5
+    std::atomic<int32_t> m_total = {0};
+};
 
 }
 }
