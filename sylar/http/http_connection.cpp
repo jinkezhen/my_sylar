@@ -1,6 +1,7 @@
 #include "sylar/streams/zlib_stream.h"
 #include "http_connection.h"
 #include "http_parser.h"
+#include "sylar/util.h"
 #include "sylar/log.h"
 
 namespace sylar {
@@ -328,11 +329,60 @@ HttpConnectionPool::HttpConnectionPool(const std::string& host
 }
 
 HttpConnection::ptr HttpConnectionPool::getConnection() {
-
+    uint64_t now_ms = sylar::GetCurrentMS();
+    std::vector<HttpConnection*> invalid_conns;
+    HttpConnection* ptr = nullptr;
+    MutexType::Lock lock(m_mutex);
+    while (!m_conns.empty()) {
+        auto conn = *m_conns.begin();
+        m_conns.pop_front();
+        if (!conn->isConnected()) {
+            invalid_conns.push_back(conn);
+            continue;
+        }
+        if (conn->m_createTime + m_maxAliveTime >= now_ms) {
+            invalid_conns.push_back(conn);
+            continue;
+        }
+        ptr = conn;
+        break;
+    }
+    lock.unlock();
+    m_total -= invalid_conns.size();
+    for (auto& i : invalid_conns) {
+        delete i;
+    }
+    if (!ptr) {
+        IPAddress::ptr addr = Address::LookupAnyIPAddress(m_host);
+        if (!addr) {
+            SYLAR_LOG_ERROR(g_logger) << "get addr fail: " << m_host;
+            return nullptr;
+        }
+        addr->setPort(m_port);
+        Socket::ptr sock = m_isHttps ? SSLSocket::CreateTCP(addr) : Socket::CreateTCP(addr);
+        if (!sock) {
+            SYLAR_LOG_ERROR(g_logger) << "create sock fail: " << *addr;
+            return nullptr;
+        }
+        if (!sock->connect(addr)) {
+            SYLAR_LOG_ERROR(g_logger) << "sock connect fail: " << *addr;
+            return nullptr;
+        }
+        ptr = new HttpConnection(sock);
+        ++m_total;
+    }
+    return HttpConnection::ptr(ptr, std::bind(&HttpConnectionPool::ReleasePtr, std::placeholders::_1, this));
 }
 
 void HttpConnectionPool::ReleasePtr(HttpConnection* ptr, HttpConnectionPool* pool) {
-    
+    ++ptr->m_request;
+    if (!ptr->isConnected() || (ptr->m_createTime + pool->m_maxAliveTime >= sylar::GetCurrentMS()) || ptr->m_request >= pool->m_maxRequest) {
+        delete ptr;
+        --pool->m_total;
+        return;
+    }
+    MutexType::Lock lock(pool->m_mutex);
+    pool->m_conns.push_back(ptr);
 }
 
 HttpResult::ptr HttpConnectionPool::doGet(const std::string& url, uint64_t timeout_ms, 
