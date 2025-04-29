@@ -1,7 +1,7 @@
 /**
  * @file http_connection.h
  * @brief httpconnection是client端connect返回的scoket
- * @date 2025-04-26
+ * @date 2025-04-29
  * @copyright Copyright (C) All rights reserved
  */
 
@@ -183,6 +183,8 @@ public:
 
 private:
     //当一个HttpConnection(HTTP连接)用完后，不是直接销毁，而是通过ReleasePtr把它归还到连接池中或者彻底销毁
+    //ptr：是当前要归还的连接指针
+    //pool：是该连接所属的连接池指针
     static void ReleasePtr(HttpConnection* ptr, HttpConnectionPool* pool); 
 private:
     //保存远程服务器的的主机名或ip地址,比如请求 http://example.com/path，那么 m_host 就是 example.com。
