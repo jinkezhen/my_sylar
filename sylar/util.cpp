@@ -345,32 +345,37 @@ bool FSUtil::OpenForWrite(std::ofstream& ofs, const std::string& filename, std::
     return ofs.is_open();
 }
 
-//str转char:只转字符串中下标为0的字符
+// str转char：只转字符串中下标为0的字符
 int8_t TypeUtil::ToChar(const std::string& str) {
     if (str.empty()) return 0;
     return *str.begin();
 }
 
+// str转int64_t：将字符串按十进制转为整数，失败返回0
 int64_t TypeUtil::Atoi(const std::string& str) {
     if (str.empty()) return 0;
     return strtoull(str.c_str(), nullptr, 10);
 }
 
+// str转double：将字符串转为浮点数，失败返回0.0
 double TypeUtil::Atof(const std::string& str) {
     if (str.empty()) return 0;
     return atof(str.c_str());
 }
 
+// c风格字符串转char：只取第一个字符，空指针返回0
 int8_t TypeUtil::ToChar(const char* str) {
     if (str == nullptr) return 0;
     return str[0];
 }
 
+// c风格字符串转int64_t：按十进制转换，失败返回0
 int64_t TypeUtil::Atoi(const char* str) {
     if (str == nullptr) return 0;
     return strtoul(str, nullptr, 10);
 }
 
+// c风格字符串转double：转换失败返回0.0
 double TypeUtil::Atof(const char* str) {
     if (str == nullptr) return 0;
     return atof(str);
