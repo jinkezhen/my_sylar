@@ -245,7 +245,49 @@ private:
     int32_t m_poolSize;
 };
 
+namespace {
+// 递归版本，每次绑定一个参数，然后递归绑定剩下的
+template<size_t N, typename T, typename... Rest>
+struct MySQLBinder<N, T, Rest...> {
+    static int Bind(std::shared_ptr<MySQLStmt> stmt, T&& value, Rest&&... rest) {
+        // 尝试将当前参数绑定到 stmt 的第 N - 1 个位置
+        if(stmt->bind(N - 1, std::forward<T>(value)) != 0) {
+            return -1;  // 绑定失败，返回错误
+        }
+        // 递归绑定剩余的参数，索引加 1
+        return MySQLBinder<N + 1, Rest...>::Bind(stmt, std::forward<Rest>(rest)...);
+    }
+};
 
+template<typename... Args>
+int bindX(MySQLBinder<1, Args...>::Bind(stmt, args...));
+}
+
+template<typename... Args>
+int MySQL::execStmt(const char* stmt, Args&&... args) {
+    auto st = MySQLStmt::Create(shared_from_this(), stmt);
+    if(!st) {
+        return -1;
+    }
+    int rt = bindX(st, args...);
+    if(rt != 0) {
+        return rt;
+    }
+    return st->execute();
+}
+
+template<class... Args>
+ISQLData::ptr MySQL::queryStmt(const char* stmt, Args&&... args) {
+    auto st = MySQLStmt::Create(shared_from_this(), stmt);
+    if(!st) {
+        return nullptr;
+    }
+    int rt = bindX(st, args...);
+    if(rt != 0) {
+        return nullptr;
+    }
+    return st->query();
+}
 
 }
 
