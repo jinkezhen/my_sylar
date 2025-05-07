@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include <string>
+#include <list>
 #include "sylar/mutex.h"
 #include "db.h"
 #include "sylar/singleton.h"
@@ -242,7 +243,150 @@ private:
     //记录当前连接是否出现了不可恢复的错误
     bool m_hasError;
     //表示所属连接池的大小上限
+    // 含义：表示某一个具体数据库连接（或数据库连接池）自身的连接数量或容量。
+    // 作用：用于跟踪该数据库连接池中创建了多少连接，或者当前使用的连接数。
+    // 管理层级：单个数据库连接池的本地统计。
     int32_t m_poolSize;
+};
+
+//事务相关类
+class MySQLTransaction : public ITransaction {
+public:
+    typedef std::shared_ptr<MySQLTransaction> ptr;
+    static MySQLTransaction::ptr Create(MySQL::ptr mysql, bool auto_commit);
+    ~MySQLTransaction();
+
+    bool begin() override;
+    bool commit() override;
+    bool rollback() override;
+
+
+    virtual int execute(const char* format, ...) override;
+    int execute(const char* format, va_list ap);
+    virtual int execute(const std::string& sql) override;
+    int64_t getLastInsertId() override;
+    std::shared_ptr<MySQL> getMySQL();
+
+    bool isAutoCommit() const { return m_autoCommit;}
+    bool isFinished() const { return m_isFinished;}
+    bool isError() const { return m_hasError;}
+
+private:
+    MySQLTransaction(MySQL::ptr mysql, bool auto_commit);
+
+private:
+    MySQL::ptr m_mysql;
+    bool m_autoCommit;
+    bool m_isFinished;
+    bool m_hasError;
+};
+
+// 这个 MySQLStmt 类的作用是对 MySQL 预处理语句（prepared statement） 
+// 进行封装，提供更高级、类型安全的接口，让开发者更方便地操作 MySQL 的语句绑定、执行与查询。
+class MySQLStmt : public IStmt, public std::enable_shared_from_this<MySQLStmt> {
+public:
+    typedef std::shared_ptr<MySQLStmt> ptr;
+    static MySQLStmt::ptr Create(MySQL::ptr db, const std::string& stmt);
+
+    ~MySQLStmt();
+
+    // 将 C++ 中的数据类型绑定到 MySQL 的预处理语句参数上，用于执行 SQL 语句前向 ? 占位符注入实际的值。
+    //每个 bind() 会为不同类型的数据创建相应的 MYSQL_BIND 对象，并存储在一个数组m_binds（std::vector<MYSQL_BIND>）中
+    int bind(int idx, const int8_t& value);
+    int bind(int idx, const uint8_t& value);
+    int bind(int idx, const int16_t& value);
+    int bind(int idx, const uint16_t& value);
+    int bind(int idx, const int32_t& value);
+    int bind(int idx, const uint32_t& value);
+    int bind(int idx, const int64_t& value);
+    int bind(int idx, const uint64_t& value);
+    int bind(int idx, const float& value);
+    int bind(int idx, const double& value);
+    int bind(int idx, const std::string& value);
+    int bind(int idx, const char* value);
+    int bind(int idx, const void* value, int len);
+    //for nullptr type
+    int bind(int index);
+    int bindInt8(int idx, const int8_t& value) override;
+    int bindUint8(int idx, const uint8_t& value) override;
+    int bindInt16(int idx, const int16_t& value) override;
+    int bindUint16(int idx, const uint16_t& value) override;
+    int bindInt32(int idx, const int32_t& value) override;
+    int bindUint32(int idx, const uint32_t& value) override;
+    int bindInt64(int idx, const int64_t& value) override;
+    int bindUint64(int idx, const uint64_t& value) override;
+    int bindFloat(int idx, const float& value) override;
+    int bindDouble(int idx, const double& value) override;
+    int bindString(int idx, const char* value) override;
+    int bindString(int idx, const std::string& value) override;
+    int bindBlob(int idx, const void* value, int64_t size) override;
+    int bindBlob(int idx, const std::string& value) override;
+    int bindTime(int idx, const time_t& value) override;
+    int bindNull(int idx) override;
+
+    int getErrno() override;
+    std::string getErrStr() override;
+
+    int execute() override;
+    int64_t getLastInsertId() override;
+    ISQLData::ptr query() override;
+
+    MYSQL_STMT* getRaw() const { return m_stmt; }
+
+private:
+    MySQLStmt(MySQL::ptr db, MYSQL_STMT* stmt);
+
+private:
+    MySQL::ptr m_mysql;
+    MYSQL_STMT* m_stmt;
+    std::vector<MYSQL_BIND> m_binds;
+};
+
+//MySQLManager类是一个数据库连接池的管理器，负责管理多个数据库连接并提供一些执行 SQL 语句和事务操作的方法。
+class MySQLManager {
+public:
+    typedef sylar::Mutex MutexType;
+
+    MySQLManager();
+    ~MySQLManager();
+
+    //获取一个数据库连接。它会根据传入的 name（连接池中某个数据库连接的标识符）返回一个 MySQL 连接实例的共享指针。
+    MySQL::ptr get(const std::string& name);
+    //该函数用于注册一个新的数据库连接配置。通过给定的连接名和一组配置参数，
+    //函数会将这些信息注册到 MySQLManager 中，以便后续创建和管理数据库连接。
+    void registerMySQL(const std::string& name, const std::map<std::string, std::string>& m_params);
+
+    //检查连接池中的连接是有效的
+    void checkConnection(int sec = 30);
+
+    //获得/设置连接池最大连接数
+    uint32_t getMaxConn() const { return m_maxConn; }
+    void setMaxConn(uint32_t v) { m_maxConn = v; }
+
+    //第一个参数 name 在这几个 execute 函数中，用来指定使用哪个数据库连接实例来执行 SQL 操作。
+    int execute(const std::string& name, const char* format, ...);
+    int execute(const std::string& name, const char* format, va_list ap);
+    int execute(const std::string& name, const std::string& sql);
+    ISQLData::ptr query(const std::string& name, const char* format, ...);
+    ISQLData::ptr query(const std::string& name, const char* format, va_list ap); 
+    ISQLData::ptr query(const std::string& name, const std::string& sql);
+
+    //打开事务
+    MySQLTransaction::ptr openTransaction(const std::string& name, bool auto_commit);
+
+private:
+    //释放 MySQL 连接，并将其放回连接池，或者在连接池已满时删除该连接
+    void freeMySQL(const std::string& name, MySQL* m);
+
+private:
+    // 最大连接数。如果 m_maxConn = 100，那不管你注册了多少个数据库，每个数据库有多少连接，加起来最多只能存在 100 个连接。
+    uint32_t m_maxConn;
+    // 用于多线程环境下的互斥锁，保护 m_conns 和 m_dbDefines。
+    MutexType m_mutex;
+    // 存储每个数据库连接名称对应的连接池（std::list<MySQL*>）。即每个数据库有一个连接池，连接池中包含多个数据库连接对象。
+    std::map<std::string, std::list<MySQL*>> m_conns;
+    // 存储数据库连接的配置定义，std::map<std::string, std::string> 用于存储配置项。
+    std::map<std::string, std::map<std::string, std::string>> m_dbDefines;
 };
 
 namespace {
