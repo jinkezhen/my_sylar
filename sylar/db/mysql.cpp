@@ -206,7 +206,7 @@ static MYSQL_RES* my_mysql_query(MYSQL* mysql, const char* sql) {
 ISQLData::ptr MySQL::query(const char* format, ...) {
     va_list ap;
     va_start(ap, format);
-    int rt = query(format, ap);
+    auto rt = query(format, ap);
     va_end(ap);
     return rt;
 }
@@ -281,6 +281,363 @@ uint64_t MySQL::getInsertId() {
         return mysql_insert_id(m_mysql.get());
     }
     return 0;
+}
+
+MySQLTransaction::ptr MySQLTransaction::Create(MySQL::ptr mysql, bool auto_commit) {
+    MySQLTransaction::ptr rt(new MySQLTransaction(mysql, auto_commit));
+    if (rt->begin()) {
+        return rt;
+    }
+    return nullptr;
+}
+
+MySQLTransaction::~MySQLTransaction() {
+    if (m_autoCommit) {
+        commit();
+    } else {
+        rollback();
+    }
+}
+
+int64_t MySQLTransaction::getLastInsertId() {
+    return m_mysql->getLastInsertId();
+}
+
+bool MySQLTransaction::begin() {
+    int rt = execute("BEGIN");
+    return rt == 0;
+}
+
+bool MySQLTransaction::commit() {
+    if(m_isFinished || m_hasError) {
+        return !m_hasError;
+    }
+    int rt = execute("COMMIT");
+    if(rt == 0) {
+        m_isFinished = true;
+    } else {
+        m_hasError = true;
+    }
+    return rt == 0;
+}
+
+bool MySQLTransaction::rollback() {
+    if (m_isFinished) {
+        return true;
+    }
+    int rt = execute("ROLLBACK");
+    if (rt == 0) {
+        m_isFinished = true;
+    } else {
+        m_hasError = true;
+    }
+    return rt == 0;
+}
+
+int MySQLTransaction::execute(const char* format, ...) {
+    va_list ap;
+    //va_start(ap, format) 告诉编译器：“ap 从 format 后面一个参数开始读取。”
+    //void myFunc(const char* format, ...);
+    // myFunc("%d %s", 42, "hello");
+    // 实际上传入了 3 个参数：
+    // format："%d %s"
+    // 42
+    // "hello"
+    //va_start(ap, format) 的作用是让 ap 指向 第二个参数 42 的位置，即 format 后面的第一个“可变参数”。
+    // 所以“从 format 后一个参数开始读取”的意思是：
+    // 在内存中，ap 被初始化为指向 format 后面第一个变长参数（此处是 42）的位置，从这里开始依次读取每个参数。
+    va_start(ap, format);
+    return execute(format, ap);
+}
+
+int MySQLTransaction::execute(const char* format, va_list ap) {
+    if(m_isFinished) {
+        SYLAR_LOG_ERROR(g_logger) << "transaction is finished, format=" << format;
+        return -1;
+    }
+    int rt = m_mysql->execute(format, ap);
+    if(rt) {
+        m_hasError = true;
+    }
+    return rt;
+}
+
+
+int MySQLTransaction::execute(const std::string& sql) {
+    if(m_isFinished) {
+        SYLAR_LOG_ERROR(g_logger) << "transaction is finished, sql=" << sql;
+        return -1;
+    }
+    int rt = m_mysql->execute(sql);
+    if(rt) {
+        m_hasError = true;
+    }
+    return rt;
+}
+
+std::shared_ptr<MySQL> MySQLTransaction::getMySQL() {
+    return m_mysql;
+}
+
+MySQLTransaction::MySQLTransaction(MySQL::ptr mysql, bool auto_commit)
+    :m_mysql(mysql)
+    ,m_autoCommit(auto_commit)
+    ,m_isFinished(false)
+    ,m_hasError(false) {
+}
+
+MySQLStmt::ptr MySQLStmt::Create(MySQL::ptr db, const std::string& stmt) {
+    auto st = mysql_stmt_init(db->getRaw().get());
+    if (!st) {
+        return nullptr;
+    }
+    if (!st) {
+        SYLAR_LOG_ERROR(g_logger) << "stmt=" << stmt << "errno=" << mysql_stmt_errno(st) << "errstr=" << mysql_stmt_error(st);
+        mysql_stmt_close(st);
+        return nullptr;
+    }
+    int count = mysql_stmt_param_count(st);
+    MySQLStmt::ptr rt(new MySQLStmt(db, st));
+    rt->m_binds.resize(count);
+    memset(&rt->m_binds[0], 0, sizeof(rt->m_binds[0]) * count);
+    return rt;
+}
+
+MySQLStmt::MySQLStmt(MySQL::ptr db, MYSQL_STMT* stmt)
+    :m_mysql(db)
+    ,m_stmt(stmt) {
+}
+
+MySQLStmt::~MySQLStmt() {
+    if (m_stmt) {
+        mysql_stmt_close(m_stmt);
+    }
+    for (auto& i : m_binds) {
+        if (i.buffer) {
+            free(i.buffer);
+        }
+    }
+}
+
+
+int MySQLStmt::bind(int idx, const int8_t& value) {
+    return bindInt8(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const uint8_t& value) {
+    return bindUint8(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const int16_t& value) {
+    return bindInt16(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const uint16_t& value) {
+    return bindUint16(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const int32_t& value) {
+    return bindInt32(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const uint32_t& value) {
+    return bindUint32(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const int64_t& value) {
+    return bindInt64(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const uint64_t& value) {
+    return bindUint64(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const float& value) {
+    return bindFloat(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const double& value) {
+    return bindDouble(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const std::string& value) {
+    return bindString(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const char* value) {
+    return bindString(idx, value);
+}
+
+int MySQLStmt::bind(int idx, const void* value, int len) {
+    return bindBlob(idx, value, len);
+}
+
+int MySQLStmt::bind(int idx) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_NULL;
+    return 0;
+}
+
+int MySQLStmt::getErrno() {
+    return mysql_stmt_errno(m_stmt);
+}
+
+std::string MySQLStmt::getErrStr() {
+    const char* e = mysql_stmt_error(m_stmt);
+    if(e) {
+        return e;
+    }
+    return "";
+}
+
+int MySQLStmt::bindNull(int idx) {
+    return bind(idx);
+}
+
+int MySQLStmt::bindInt8(int idx, const int8_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_TINY;
+#define BIND_COPY(ptr, size) \
+    if (m_binds[idx].buffer == nullptr) { \
+        m_binds[idx].buffer = malloc(size); \
+    }\
+    memcpy(m_binds[idx].buffer, ptr, size);
+
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = false;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+
+int MySQLStmt::bindUint8(int idx, const uint8_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_TINY;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = true;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindInt16(int idx, const int16_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_SHORT;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = false;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindUint16(int idx, const uint16_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_SHORT;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = true;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindInt32(int idx, const int32_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_LONG;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = false;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindUint32(int idx, const uint32_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_LONG;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = true;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindInt64(int idx, const int64_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_LONGLONG;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = false;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindUint64(int idx, const uint64_t& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_LONGLONG;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].is_unsigned = true;
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindFloat(int idx, const float& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_FLOAT;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindDouble(int idx, const double& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_DOUBLE;
+    BIND_COPY(&value, sizeof(value));
+    m_binds[idx].buffer_length = sizeof(value);
+    return 0;
+}
+
+int MySQLStmt::bindString(int idx, const char* value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_STRING;
+#define BIND_COPY_LEN(ptr, size) \
+    if (m_binds[idx].buffer == nullptr) { \
+        m_binds[idx].buffer = malloc(size); \
+    } else if (m_binds[idx].buffer_length < (size_t)size) { \
+        free(m_binds[idx].buffer); \
+        m_binds[idx].buffer = malloc(size); \
+    } \
+    memcpy(m_binds[idx].buffer, ptr, size); \
+    m_binds[idx].buffer_length = size;
+    BIND_COPY_LEN(value, strlen(value));
+    return 0;
+}
+
+
+int MySQLStmt::bindString(int idx, const std::string& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_STRING;
+    BIND_COPY_LEN(value.c_str(), value.size());
+    return 0;
+}
+
+int MySQLStmt::bindBlob(int idx, const void* value, int64_t size) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_BLOB;
+    BIND_COPY_LEN(value, size);
+    return 0;
+}
+
+int MySQLStmt::bindBlob(int idx, const std::string& value) {
+    idx -= 1;
+    m_binds[idx].buffer_type = MYSQL_TYPE_BLOB;
+    BIND_COPY_LEN(value.c_str(), value.size());
+    return 0;
+}
+
+int MySQLStmt::bindTime(int idx, const time_t& value) {
+    return bindString(idx, sylar::Time2Str(value));
+}
+
+int MySQLStmt::execute() {
+    mysql_stmt_bind_param(m_stmt, &m_binds[0]);
+    return mysql_stmt_execute(m_stmt);
+}
+
+int64_t MySQLStmt::getLastInsertId() {
+    return mysql_stmt_insert_id(m_stmt);
 }
 
 MySQLRes::MySQLRes(MYSQL_RES* res, int eno, const char* estr) 
@@ -487,11 +844,11 @@ MySQLStmtRes::ptr MySQLStmtRes::Create(std::shared_ptr<MySQLStmt> stmt) {
 }
 
 int MySQLStmtRes::getDataCount() {
-    return mysql_stmt_num_rows(m_stmt->getRow());
+    return mysql_stmt_num_rows(m_stmt->getRaw());
 }
 
 int MySQLStmtRes::getColumnCount() {
-    return mysql_stmt_field_count(m_stmt->getRow());
+    return mysql_stmt_field_count(m_stmt->getRaw());
 }
 
 int MySQLStmtRes::getColumnBytes(int idx) {
@@ -614,5 +971,172 @@ MySQLStmtRes::~MySQLStmtRes() {
     }
 }
 
+//std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, 等是 占位符，用于在 C++ 中与 std::bind 配合使用，表示将来传递给函数的实际参数的位置。
+//这些占位符的作用是为函数调用提供一种机制，可以将某些参数的位置留到实际调用时再指定。这些占位符被用在 std::bind 中，用来告诉编译器实际的参数将会在哪个位置。
+//假设有一个成员函数如下：
+//void MyClass::printValues(int a, double b, const std::string& c) {
+//     std::cout << "a: " << a << ", b: " << b << ", c: " << c << std::endl;
+// }
+// MyClass obj;
+// 使用 std::bind 绑定函数，固定最后一个参数为 "hello"，其他参数占位
+// auto boundFunction = std::bind(&MyClass::printValues, &obj, std::placeholders::_1, std::placeholders::_2, "hello");
+// 现在只需要传递前两个参数
+// boundFunction(10, 3.14); // 这会调用 printValues(10, 3.14, "hello")
+MySQL::ptr MySQLManager::get(const std::string& name) {
+    MutexType::Lock lock(m_mutex);
+    auto it = m_conns.find(name);
+    if (it != m_conns.end()) {
+        if (!it->second.empty()) {
+            MySQL* rt = it->second.front();
+            it->second.pop_front();
+            lock.unlock();
+            if (!rt->isNeedCheck()) {
+                rt->m_lastUsedTime = time(0);
+                // 实际等价于 auto f = [&](MySQL* m) { this->freeMySQL(name, m); }
+                // 这里的 m 是由 shared_ptr 的删除器机制自动传入的。
+                // 当构造 shared_ptr 时手动指定删除器，
+                // 在 shared_ptr 最后一个引用被销毁时，它会调用指定的删除器，
+                // 并将自己所托管的原始指针（即 m）作为参数传入。
+                return MySQL::ptr(rt, std::bind(&MySQLManager::freeMySQL, this, name, std::placeholders::_1));
+            } 
+            if (rt->ping()) {
+                rt->m_lastUsedTime = time(0);
+                return MySQL::ptr(rt, std::bind(&MySQLManager::freeMySQL, this, name, std::placeholders::_1));
+            } else if (rt->connect()) {
+                rt->m_lastUsedTime = time(0);
+                return MySQL::ptr(rt, std::bind(&MySQLManager::freeMySQL,
+                            this, name, std::placeholders::_1));
+            } else {
+                return nullptr;
+            }
+        }
+    }
+    // 如果连接池为空，尝试根据配置重新创建新的连接
+    auto config = g_mysql_dbs->getValue();
+    auto sit = config.find(name);
+    std::map<std::string, std::string> args;
+    if (sit != config.end()) {
+        args = sit->second;
+    } else {
+        // 如果配置中找不到，再检查 m_dbDefines 中是否有定义
+        sit = m_dbDefines.find(name);
+        if (sit != m_dbDefines.end()) {
+            args = sit->second;
+        } else {
+            return nullptr;
+        }
+    }
+    lock.unlock();
+    MySQL* rt = new MySQL(args);
+    if (rt->connect()) {
+        rt->m_lastUsedTime = time(0);
+        return MySQL::ptr(rt, std::bind(&MySQLManager::freeMySQL, this, name, std::placeholders::_1));
+    } else {
+        delete rt;
+        return nullptr;
+    }
+}
+
+void MySQLManager::registerMySQL(const std::string& name, const std::map<std::string, std::string>& params) {
+    MutexType::Lock lock(m_mutex);
+    m_dbDefines[name] = params;
+}
+
+void MySQLManager::checkConnection(int sec) {
+    time_t now = time(0);
+    std::vector<MySQL*> conns;
+    MutexType::Lock lock(m_mutex);
+    for (auto& i : m_conns) {
+        for (auto it = i.second.begin(); it != i.second.end(); ++it) {
+            if ((int)(now - (*it)->m_lastUsedTime) >= sec) {
+                auto tmp = *it;
+                i.second.erase(it);
+                conns.push_back(tmp);
+            }
+        }
+    }
+    lock.unlock();
+    for (auto& i : conns) {
+        delete i;
+    }
+}
+
+int MySQLManager::execute(const std::string& name, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int rt = execute(name, format, ap);
+    va_end(ap);
+    return rt;
+}
+
+int MySQLManager::execute(const std::string& name, const char* format, va_list ap) {
+    auto conn = get(name);
+    if(!conn) {
+        SYLAR_LOG_ERROR(g_logger) << "MySQLManager::execute, get(" << name
+            << ") fail, format=" << format;
+        return -1;
+    }
+    return conn->execute(format, ap);
+}
+
+int MySQLManager::execute(const std::string& name, const std::string& sql) {
+    auto conn = get(name);
+    if(!conn) {
+        SYLAR_LOG_ERROR(g_logger) << "MySQLManager::execute, get(" << name
+            << ") fail, sql=" << sql;
+        return -1;
+    }
+    return conn->execute(sql);
+}
+
+ISQLData::ptr MySQLManager::query(const std::string& name, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    auto res = query(name, format, ap);
+    va_end(ap);
+    return res;
+}
+
+ISQLData::ptr MySQLManager::query(const std::string& name, const char* format, va_list ap) {
+    auto conn = get(name);
+    if(!conn) {
+        SYLAR_LOG_ERROR(g_logger) << "MySQLManager::query, get(" << name
+            << ") fail, format=" << format;
+        return nullptr;
+    }
+    return conn->query(format, ap);
+}
+
+ISQLData::ptr MySQLManager::query(const std::string& name, const std::string& sql) {
+    auto conn = get(name);
+    if(!conn) {
+        SYLAR_LOG_ERROR(g_logger) << "MySQLManager::query, get(" << name
+            << ") fail, sql=" << sql;
+        return nullptr;
+    }
+    return conn->query(sql);
+}
+
+MySQLTransaction::ptr MySQLManager::openTransaction(const std::string& name, bool auto_commit) {
+    auto conn = get(name);
+    if (!conn) {
+        SYLAR_LOG_ERROR(g_logger) << "MySQLManager::openTransaction, get(" << name
+        << ") fail";
+        return nullptr;
+    }
+    MySQLTransaction::ptr trans(MySQLTransaction::Create(conn, auto_commit));
+    return trans;
+}
+
+void MySQLManager::freeMySQL(const std::string& name, MySQL* m) {
+    if (m->m_mysql) { //连接还有效
+        MutexType::Lock lock(m_mutex);
+        if (m_conns[name].size() < (size_t)m->m_poolSize) {    //检查连接池是否已满
+            m_conns[name].push_back(m);
+            return;
+        }
+    }
+    delete m;
+}
 
 }
