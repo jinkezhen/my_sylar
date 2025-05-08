@@ -389,48 +389,145 @@ private:
     std::map<std::string, std::map<std::string, std::string>> m_dbDefines;
 };
 
+typedef sylar::Singleton<MySQLManager> MySQLMgr;
+
+//这个 MySQLUtil 工具类的作用是：为应用程序提供简洁统一的方式来执行 MySQL 查询和执行 SQL 语句，
+//它作为数据库操作的“门面（Facade）”，封装了底层连接池、语句拼接、异常处理等细节。
+class MySQLUtil {
+public:
+    //假设你在配置文件中定义了多个数据库连接：
+    //mysql:
+    //   default:
+    //     host: localhost
+    //     user: root
+    //     password: 123456
+    //     db: main_db
+    //   analytics:
+    //     host: 192.168.1.100
+    //     user: stat
+    //     password: abc123
+    //     db: analytics_db
+    //那么你可以这样调用：
+    //auto res1 = MySQLUtil::Query("default", "SELECT * FROM users");
+    static ISQLData::ptr Query(const std::string& name, const char* format, ...);
+    static ISQLData::ptr Query(const std::string& name, const char* format,va_list ap); 
+    static ISQLData::ptr Query(const std::string& name, const std::string& sql);
+    //尝试执行 SQL 语句，失败时最多重试 count 次
+    static ISQLData::ptr TryQuery(const std::string& name, uint32_t count, const char* format, ...);
+    static ISQLData::ptr TryQuery(const std::string& name, uint32_t count, const std::string& sql);
+
+    static int Execute(const std::string& name, const char* format, ...);
+    static int Execute(const std::string& name, const char* format, va_list ap); 
+    static int Execute(const std::string& name, const std::string& sql);
+    static int TryExecute(const std::string& name, uint32_t count, const char* format, ...);
+    static int TryExecute(const std::string& name, uint32_t count, const char* format, va_list ap); 
+    static int TryExecute(const std::string& name, uint32_t count, const std::string& sql);
+};
+    
+
 namespace {
-// 递归版本，每次绑定一个参数，然后递归绑定剩下的
-template<size_t N, typename T, typename... Rest>
-struct MySQLBinder<N, T, Rest...> {
-    static int Bind(std::shared_ptr<MySQLStmt> stmt, T&& value, Rest&&... rest) {
-        // 尝试将当前参数绑定到 stmt 的第 N - 1 个位置
-        if(stmt->bind(N - 1, std::forward<T>(value)) != 0) {
-            return -1;  // 绑定失败，返回错误
+
+// 定义一个递归模板，用于绑定 SQL 语句的多个参数
+template<size_t N, typename Head, typename... Tail>
+struct MySQLBinder {
+    // 绑定当前参数并递归绑定剩余的参数
+    static int Bind(MySQLStmt::ptr stmt, const Head& value, Tail&... tail) {
+        // 将当前参数绑定到 SQL 语句的第 N 个位置
+        int rt = stmt->bind(N, value);
+        if (rt != 0) {  // 如果绑定失败，返回错误码
+            return rt;
         }
-        // 递归绑定剩余的参数，索引加 1
-        return MySQLBinder<N + 1, Rest...>::Bind(stmt, std::forward<Rest>(rest)...);
+        // 递归继续绑定剩余的参数，索引 N + 1 表示下一个参数的位置
+        return MySQLBinder<N + 1, Tail...>::Bind(stmt, tail...);
     }
 };
 
+// 特化版本：当没有剩余参数时，结束递归
+template<size_t N>
+struct MySQLBinder<N> {
+    static int Bind(MySQLStmt::ptr stmt) {
+        return 0;  // 递归结束，返回 0，表示绑定成功
+    }
+};
+
+}  // namespace
+
+// bindX 函数，用于开始递归绑定过程
 template<typename... Args>
-int bindX(MySQLBinder<1, Args...>::Bind(stmt, args...));
+int bindX(MySQLStmt::ptr stmt, Args&... args) {
+    // 从参数索引 1 开始递归绑定所有参数
+    return MySQLBinder<1, Args...>::Bind(stmt, args...);
 }
 
 template<typename... Args>
+// execStmt 用于执行带有多个参数的 SQL 语句
 int MySQL::execStmt(const char* stmt, Args&&... args) {
+    // 创建 MySQLStmt 对象，并准备执行 SQL 语句
     auto st = MySQLStmt::Create(shared_from_this(), stmt);
-    if(!st) {
+    if (!st) {  // 如果创建失败，返回 -1
         return -1;
     }
+    
+    // 绑定传入的参数
     int rt = bindX(st, args...);
-    if(rt != 0) {
+    if (rt != 0) {  // 如果绑定失败，返回绑定错误
         return rt;
     }
+    
+    // 执行 SQL 语句
     return st->execute();
 }
 
 template<class... Args>
+// queryStmt 用于执行带有多个参数的 SQL 查询
 ISQLData::ptr MySQL::queryStmt(const char* stmt, Args&&... args) {
+    // 创建 MySQLStmt 对象，并准备执行 SQL 查询
     auto st = MySQLStmt::Create(shared_from_this(), stmt);
-    if(!st) {
+    if (!st) {  // 如果创建失败，返回空指针
         return nullptr;
     }
+    
+    // 绑定传入的参数
     int rt = bindX(st, args...);
-    if(rt != 0) {
+    if (rt != 0) {  // 如果绑定失败，返回空指针
         return nullptr;
     }
+    
+    // 执行查询
     return st->query();
+}
+
+// 以下是宏定义，用于为不同类型生成特化版本的 MySQLBinder
+namespace {
+#define XX(type, type2) \
+template<size_t N, typename... Tail> \
+struct MySQLBinder<N, type, Tail...> { \
+    static int Bind(MySQLStmt::ptr stmt, type2 value, Tail&... tail) { \
+        int rt = stmt->bind(N, value); \
+        if (rt != 0) {  // 如果绑定失败，返回错误码 \
+            return rt; \
+        } \
+        // 递归绑定剩余的参数
+        return MySQLBinder<N + 1, Tail...>::Bind(stmt, tail...); \
+    } \
+};
+
+// 通过宏实例化不同类型的绑定逻辑
+XX(char*, char*);          // 处理 char* 类型的参数
+XX(const char*, char*);    // 处理 const char* 类型的参数
+XX(std::string, std::string&); // 处理 std::string 类型的参数
+XX(int8_t, int8_t&);       // 处理 int8_t 类型的参数
+XX(uint8_t, uint8_t&);     // 处理 uint8_t 类型的参数
+XX(int16_t, int16_t&);     // 处理 int16_t 类型的参数
+XX(uint16_t, uint16_t&);   // 处理 uint16_t 类型的参数
+XX(int32_t, int32_t&);     // 处理 int32_t 类型的参数
+XX(uint32_t, uint32_t&);   // 处理 uint32_t 类型的参数
+XX(int64_t, int64_t&);     // 处理 int64_t 类型的参数
+XX(uint64_t, uint64_t&);   // 处理 uint64_t 类型的参数
+XX(float, float&);         // 处理 float 类型的参数
+XX(double, double&);       // 处理 double 类型的参数
+
+#undef XX
 }
 
 }
