@@ -531,5 +531,5 @@ XX(double, double&);       // 处理 double 类型的参数
 }
 
 }
-
+}
 #endif
