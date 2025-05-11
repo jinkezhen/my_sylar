@@ -442,14 +442,6 @@ struct MySQLBinder {
     }
 };
 
-// 特化版本：当没有剩余参数时，结束递归
-template<size_t N>
-struct MySQLBinder<N> {
-    static int Bind(MySQLStmt::ptr stmt) {
-        return 0;  // 递归结束，返回 0，表示绑定成功
-    }
-};
-
 }  // namespace
 
 // bindX 函数，用于开始递归绑定过程
@@ -505,12 +497,10 @@ struct MySQLBinder<N, type, Tail...> { \
     static int Bind(MySQLStmt::ptr stmt, type2 value, Tail&... tail) { \
         int rt = stmt->bind(N, value); \
         if (rt != 0) {  // 如果绑定失败，返回错误码 \
-            return rt; \
-        } \
-        // 递归绑定剩余的参数
+        // 递归绑定剩余的参数                       \             
         return MySQLBinder<N + 1, Tail...>::Bind(stmt, tail...); \
     } \
-};
+};    
 
 // 通过宏实例化不同类型的绑定逻辑
 XX(char*, char*);          // 处理 char* 类型的参数
@@ -528,8 +518,9 @@ XX(float, float&);         // 处理 float 类型的参数
 XX(double, double&);       // 处理 double 类型的参数
 
 #undef XX
-}
 
 }
 }
+}
+
 #endif
