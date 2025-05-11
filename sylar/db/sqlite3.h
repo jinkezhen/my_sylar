@@ -242,8 +242,113 @@ private:
     bool m_autoCommit;
 };
 
+class SQLite3Manager {
+public:
+    typedef sylar::Mutex MutexType;
+    SQLite3Manager();
+    ~SQLite3Manager();
 
+    SQLite3::ptr get(const std::string& name);
+    void registerSQLite3(const std::string& name, const std::map<std::string, std::string>& params);
+
+    void checkConnection(int sec = 30);
+
+    uint32_t getMaxConn() const { return m_maxConn;}
+    void setMaxConn(uint32_t v) { m_maxConn = v;}
+
+    int execute(const std::string& name, const char* format, ...);
+    int execute(const std::string& name, const char* format, va_list ap);
+    int execute(const std::string& name, const std::string& sql);
+
+    ISQLData::ptr query(const std::string& name, const char* format, ...);
+    ISQLData::ptr query(const std::string& name, const char* format, va_list ap); 
+    ISQLData::ptr query(const std::string& name, const std::string& sql);
+
+    SQLite3Transaction::ptr openTransaction(const std::string& name, bool auto_commit);
+private:
+    void freeSQLite3(const std::string& name, SQLite3* m);
+private:
+    uint32_t m_maxConn;
+    MutexType m_mutex;
+    std::map<std::string, std::list<SQLite3*> > m_conns;
+    std::map<std::string, std::map<std::string, std::string> > m_dbDefines;
+};
+
+typedef sylar::Singleton<SQLite3Manager> SQLite3Mgr;
+
+namespace {
+template<typename... Args>
+int bindX(SQLite3Stmt::ptr stmt, const Args&... args) {
+    return SQLite3Binder<1, Args...>::Bind(stmt, args...);
+}
 }
 
+template<typename... Args>
+int SQLite3::execStmt(const char* stmt, Args&&... args) {
+    auto st = SQLite3Stmt::Create(shared_from_this(), stmt);
+    if(!st) {
+        return -1;
+    }
+    int rt = bindX(st, args...);
+    if(rt != SQLITE_OK) {
+        return rt;
+    }
+    return st->execute();
+}
 
+template<class... Args>
+ISQLData::ptr SQLite3::queryStmt(const char* stmt, const Args&... args) {
+    auto st = SQLite3Stmt::Create(shared_from_this(), stmt);
+    if(!st) {
+        return nullptr;
+    }
+    int rt = bindX(st, args...);
+    if(rt != SQLITE_OK) {
+        return nullptr;
+    }
+    return st->query();
+}
+
+namespace {
+
+template<size_t N, typename Head, typename... Tail>
+struct SQLite3Binder<N, Head, Tail...> {
+    static int Bind(SQLite3Stmt::ptr stmt
+                    ,const Head&, const Tail&...) {
+        static_assert(sizeof...(Tail) < 0, "invalid type");
+        return SQLITE_OK;
+    }
+};
+
+#define XX(type, type2) \
+template<size_t N, typename... Tail> \
+struct SQLite3Binder<N, type, Tail...> { \
+    static int Bind(SQLite3Stmt::ptr stmt \
+                    , const type2& value \
+                    , const Tail&... tail) { \
+        int rt = stmt->bind(N, value); \
+        if(rt != SQLITE_OK) { \
+            return rt; \
+        } \
+        return SQLite3Binder<N + 1, Tail...>::Bind(stmt, tail...); \
+    } \
+};
+
+XX(char*, char* const);
+XX(const char*, char* const);
+XX(std::string, std::string);
+XX(int8_t, int32_t);
+XX(uint8_t, int32_t);
+XX(int16_t, int32_t);
+XX(uint16_t, int32_t);
+XX(int32_t, int32_t);
+XX(uint32_t, int32_t);
+XX(int64_t, int64_t);
+XX(uint64_t, int64_t);
+XX(float, double);
+XX(double, double);
+#undef XX
+
+}
+}
 #endif
