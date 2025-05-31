@@ -121,7 +121,7 @@ private:
     std::string m_name;            ///< 表名
     std::string m_namespace;       ///< 表映射的命名空间
     std::string m_desc;            ///< 表描述信息
-    std::string m_subfix = "_info";///< 自动生成类名的后缀（如 User → User_info）
+    std::string m_subfix = "_info";///< 自动生成表名(类名)的后缀（如 User → User_info）
 
     DBType m_type = TYPE_SQLITE3;  ///< 当前使用的数据库类型，默认是 SQLite3
 
