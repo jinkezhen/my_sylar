@@ -389,6 +389,636 @@ Column::ptr Table::getCol(const std::string& name) const {
 }
 
 
+void Table::gen_dao_inc(std::ofstream& ofs) {
+    std::string class_name = m_name + m_subfix;
+    std::string class_name_dao = class_name + "_dao";
+    ofs << "class " << GetAsClassName(class_name_dao) << " {" << std::endl;
+    ofs << "public:" << std::endl;
+    ofs << "    typedef std::shared_ptr<" << GetAsClassName(class_name_dao) << "> ptr;" << std::endl;
+    ofs << "    static int Update(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn);" << std::endl;
+    ofs << "    static int Insert(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn);" << std::endl;
+    ofs << "    static int InsertOrUpdate(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn);" << std::endl;
+    ofs << "    static int Delete(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn);" << std::endl;
+    auto vs = getPKs();
+    ofs << "    static int Delete(";
+    for(auto& i : vs) {
+        ofs << "const " << i->getDTypeString() << "& "
+            << GetAsVariable(i->getName()) << ", ";
+    }
+    ofs << m_updateclass << "::ptr conn);" << std::endl;
+
+    for(auto& i : m_idxs) {
+        if(i->getDType() == Index::TYPE_UNIQ
+            || i->getDType() == Index::TYPE_PK
+            || i->getDType() == Index::TYPE_INDEX) {
+            ofs << "    static int Delete";
+            std::string tmp = "by";
+            for(auto& c : i->getCols()) {
+                tmp += "_" + c;
+            }
+            ofs << GetAsClassName(tmp) << "(";
+            for(auto& c : i->getCols()) {
+                auto d = getCol(c);
+                ofs << " const " << d->getDTypeString() << "& "
+                    << GetAsVariable(d->getName()) << ", ";
+            }
+            ofs << m_updateclass << "::ptr conn);" << std::endl;
+        }
+    }
+
+
+    ofs << "    static int QueryAll(std::vector<"
+        << GetAsClassName(class_name) << "::ptr>& results, " << m_queryclass << "::ptr conn);" << std::endl;
+    ofs << "    static " << GetAsClassName(class_name) << "::ptr Query(";
+    for(auto& i : vs) {
+        ofs << " const " << i->getDTypeString() << "& "
+            << GetAsVariable(i->getName()) << ", ";
+    }
+    ofs << m_queryclass << "::ptr conn);" << std::endl;
+
+    for(auto& i : m_idxs) {
+        if(i->getDType() == Index::TYPE_UNIQ) {
+            ofs << "    static " << GetAsClassName(class_name) << "::ptr Query";
+            std::string tmp = "by";
+            for(auto& c : i->getCols()) {
+                tmp += "_" + c;
+            }
+            ofs << GetAsClassName(tmp) << "(";
+            for(auto& c : i->getCols()) {
+                auto d = getCol(c);
+                ofs << " const " << d->getDTypeString() << "& "
+                    << GetAsVariable(d->getName()) << ", ";
+            }
+            ofs << m_queryclass << "::ptr conn);" << std::endl;
+        } else if(i->getDType() == Index::TYPE_INDEX) {
+            ofs << "    static int Query";
+            std::string tmp = "by";
+            for(auto& c : i->getCols()) {
+                tmp += "_" + c;
+            }
+            ofs << GetAsClassName(tmp) << "(";
+            ofs << "std::vector<" << GetAsClassName(class_name) << "::ptr>& results, ";
+            for(auto& c : i->getCols()) {
+                auto d = getCol(c);
+                ofs << " const " << d->getDTypeString() << "& "
+                    << GetAsVariable(d->getName()) << ", ";
+            }
+            ofs << m_queryclass << "::ptr conn);" << std::endl;
+        }
+    }
+
+    ofs << "    static int CreateTableSQLite3(" << m_dbclass << "::ptr info);" << std::endl;
+    ofs << "    static int CreateTableMySQL(" << m_dbclass << "::ptr info);" << std::endl;
+    ofs << "};" << std::endl;
+}
+
+template<class V, class T>
+bool is_exists(const V& v, const T& t) {
+    for (auto& i : v) {
+        if (i == t) return true;
+    }
+    return false;
+}
+
+void Table::gen_dao_src(std::ofstream& ofs) {
+    std::string class_name = m_name + m_subfix;
+    std::string class_name_dao = class_name + "_dao";
+    ofs << "int " << GetAsClassName(class_name_dao)
+        << "::Update(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn) {" << std::endl;
+    ofs << "    std::string sql = \"update " << m_name << " set";
+    auto pks = getPKs();
+    bool is_first = true;
+    for(auto& i : m_cols) {
+        if(is_exists(pks, i)) {
+            continue;
+        }
+        if(!is_first) {
+            ofs << ",";
+        }
+        ofs << " " << i->getName() << " = ?";
+        is_first = false;
+    }
+
+    ofs << " where";
+    is_first = true;
+    for(auto& i : pks) {
+        if(!is_first) {
+            ofs << " and";
+        }
+        ofs << " " << i->getName() << " = ?";
+    }
+    ofs << "\";" << std::endl;
+#define CHECK_STMT(v) \
+    ofs << "    auto stmt = conn->prepare(sql);" << std::endl; \
+    ofs << "    if(!stmt) {" << std::endl; \
+    ofs << "        SYLAR_LOG_ERROR(g_logger) << \"stmt=\" << sql" << std::endl << \
+        "                 << \" errno=\"" \
+        " << conn->getErrno() << \" errstr=\" << conn->getErrStr();" << std::endl \
+        << "        return " v ";" << std::endl; \
+    ofs << "    }" << std::endl;
+
+    CHECK_STMT("conn->getErrno()");
+    is_first = true;
+    int idx = 1;
+    for(auto& i : m_cols) {
+        if(is_exists(pks, i)) {
+            continue;
+        }
+        ofs << "    stmt->" << i->getBindString() << "(" << idx << ", ";
+        ofs << "info->" << GetAsMemberName(i->getName());
+        ofs << ");" << std::endl;
+        ++idx;
+    }
+    for(auto& i : pks) {
+        ofs << "    stmt->" << i->getBindString() << "(" << idx << ", ";
+        ofs << "info->" << GetAsMemberName(i->getName()) << ");" << std::endl;
+        ++idx;
+    }
+    ofs << "    return stmt->execute();" << std::endl;
+
+    ofs << "}" << std::endl << std::endl;
+    ofs << "int " << GetAsClassName(class_name_dao)
+        << "::Insert(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn) {" << std::endl;
+    ofs << "    std::string sql = \"insert into " << m_name << " (";
+    is_first = true;
+    Column::ptr auto_inc;
+
+    for(auto& i : m_cols) {
+        if(i->isAutoIncrement()) {
+            auto_inc = i;
+            continue;
+        }
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << i->getName();
+        is_first = false;
+    }
+
+    ofs << ") values (";
+    is_first = true;
+    for(auto& i : m_cols) {
+        if(i->isAutoIncrement()) {
+            continue;
+        }
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << "?";
+        is_first = false;
+    }
+    ofs << ")\";" << std::endl;
+
+    CHECK_STMT("conn->getErrno()");
+
+    idx = 1;
+    for(auto& i : m_cols) {
+        if(i->isAutoIncrement()) {
+            continue;
+        }
+        ofs << "    stmt->" << i->getBindString() << "(" << idx << ", ";
+        ofs << "info->" << GetAsMemberName(i->getName());
+        ofs << ");" << std::endl;
+        ++idx;
+    }
+    ofs << "    int rt = stmt->execute();" << std::endl;
+    if(auto_inc) {
+        ofs << "    if(rt == 0) {" << std::endl;
+        ofs << "        info->" << GetAsMemberName(auto_inc->getName())
+            << " = conn->getLastInsertId();" << std::endl
+            << "    }" << std::endl;
+    }
+    ofs << "    return rt;" << std::endl;
+    ofs << "}" << std::endl << std::endl;
+
+    ofs << "int " << GetAsClassName(class_name_dao)
+        << "::InsertOrUpdate(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn) {" << std::endl;
+    for(auto& i : m_cols) {
+        if(i->isAutoIncrement()) {
+            auto_inc = i;
+            break;
+        }
+    }
+    if(auto_inc) {
+        ofs << "    if(info->" << GetAsMemberName(auto_inc->getName()) << " == 0) {" << std::endl;
+        ofs << "        return Insert(info, conn);" << std::endl;
+        ofs << "    }" << std::endl;
+    }
+    ofs << "    std::string sql = \"replace into " << m_name << " (";
+    is_first = true;
+    for(auto& i : m_cols) {
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << i->getName();
+        is_first = false;
+    }
+
+    ofs << ") values (";
+    is_first = true;
+    for(auto& i : m_cols) {
+        (void)i;
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << "?";
+        is_first = false;
+    }
+    ofs << ")\";" << std::endl;
+
+    CHECK_STMT("conn->getErrno()");
+    idx = 1;
+    for(auto& i : m_cols) {
+        ofs << "    stmt->" << i->getBindString() << "(" << idx << ", ";
+        ofs << "info->" << GetAsMemberName(i->getName()) << ");" << std::endl;
+        ++idx;
+    }
+    ofs << "    return stmt->execute();" << std::endl;
+    ofs << "}" << std::endl << std::endl;
+
+    ofs << "int " << GetAsClassName(class_name_dao)
+        << "::Delete(" << GetAsClassName(class_name)
+        << "::ptr info, " << m_updateclass << "::ptr conn) {" << std::endl;
+
+    ofs << "    std::string sql = \"delete from " << m_name << " where";
+    is_first = true;
+    for(auto& i : pks) {
+        if(!is_first) {
+            ofs << " and";
+        }
+        ofs << " " << i->getName() << " = ?";
+        is_first = false;
+    }
+    ofs << "\";" << std::endl;
+    CHECK_STMT("conn->getErrno()");
+    idx = 1;
+    for(auto& i : pks) {
+        ofs << "    stmt->" << i->getBindString() << "(" << idx << ", ";
+        ofs << "info->" << GetAsMemberName(i->getName()) << ");" << std::endl;
+        ++idx;
+    }
+    ofs << "    return stmt->execute();" << std::endl;
+    ofs << "}" << std::endl << std::endl;
+
+    for(auto& i : m_idxs) {
+        if(i->getDType() == Index::TYPE_UNIQ
+            || i->getDType() == Index::TYPE_PK
+            || i->getDType() == Index::TYPE_INDEX) {
+            ofs << "int " << GetAsClassName(class_name_dao) << "::Delete";
+            std::string tmp = "by";
+            for(auto& c : i->getCols()) {
+                tmp += "_" + c;
+            }
+            ofs << GetAsClassName(tmp) << "(";
+            for(auto& c : i->getCols()) {
+                auto d = getCol(c);
+                ofs << " const " << d->getDTypeString() << "& "
+                    << GetAsVariable(d->getName()) << ", ";
+            }
+            ofs << m_updateclass << "::ptr conn) {" << std::endl;
+            ofs << "    std::string sql = \"delete from " << m_name << " where";
+            is_first = true;
+            for(auto& x : i->getCols()) {
+                if(!is_first) {
+                    ofs << " and";
+                }
+                ofs << " " << x << " = ?";
+                is_first = false;
+            }
+            ofs << "\";" << std::endl;
+            CHECK_STMT("conn->getErrno()");
+            idx = 1;
+            for(auto& x : i->getCols()) {
+                ofs << "    stmt->" << getCol(x)->getBindString() << "(" << idx << ", ";
+                ofs << GetAsVariable(x) << ");" << std::endl;
+            }
+            ofs << "    return stmt->execute();" << std::endl;
+            ofs << "}" << std::endl << std::endl;
+        }
+    }
+
+
+    ofs << "int " << GetAsClassName(class_name_dao) << "::QueryAll(std::vector<"
+        << GetAsClassName(class_name) << "::ptr>& results, "
+        << m_queryclass << "::ptr conn) {" << std::endl;
+    ofs << "    std::string sql = \"select ";
+    is_first = true;
+    for(auto& i : m_cols) {
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << i->getName();
+        is_first = false;
+    }
+    ofs << " from " << m_name << "\";" << std::endl;
+    CHECK_STMT("conn->getErrno()");
+    ofs << "    auto rt = stmt->query();" << std::endl;
+    ofs << "    if(!rt) {" << std::endl;
+    ofs << "        return stmt->getErrno();" << std::endl;
+    ofs << "    }" << std::endl;
+    ofs << "    while (rt->next()) {" << std::endl;
+    ofs << "        " << GetAsClassName(class_name) << "::ptr v(new "
+        << GetAsClassName(class_name) << ");" << std::endl;
+
+#define PARSE_OBJECT(prefix) \
+    for(size_t i = 0; i < m_cols.size(); ++i) { \
+        ofs << prefix "v->" << GetAsMemberName(m_cols[i]->getName()) << " = "; \
+        ofs << "rt->" << m_cols[i]->getGetString() << "(" << (i) << ");" << std::endl; \
+    }
+    PARSE_OBJECT("        ");
+    ofs << "        results.push_back(v);" << std::endl;
+    ofs << "    }" << std::endl;
+    ofs << "    return 0;" << std::endl;
+    ofs << "}" << std::endl << std::endl;
+
+    ofs << GetAsClassName(class_name) << "::ptr "
+        << GetAsClassName(class_name_dao) << "::Query(";
+    for(auto& i : pks) {
+        ofs << " const " << i->getDTypeString() << "& "
+            << GetAsVariable(i->getName()) << ", ";
+    }
+    ofs << m_queryclass << "::ptr conn) {" << std::endl;
+
+    ofs << "    std::string sql = \"select ";
+    is_first = true;
+    for(auto& i : m_cols) {
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << i->getName();
+        is_first = false;
+    }
+    ofs << " from " << m_name << " where";
+    is_first = true;
+    for(auto& i : pks) {
+        if(!is_first) {
+            ofs << " and";
+        }
+        ofs << " " << i->getName() << " = ?";
+        is_first = false;
+    }
+    ofs << "\";" << std::endl;
+
+    CHECK_STMT("nullptr");
+    idx = 1;
+    for(auto& i : pks) {
+        ofs << "    stmt->" << i->getBindString() << "(" << idx << ", ";
+        ofs << GetAsVariable(i->getName()) << ");" << std::endl;
+        ++idx;
+    }
+    ofs << "    auto rt = stmt->query();" << std::endl;
+    ofs << "    if(!rt) {" << std::endl;
+    ofs << "        return nullptr;" << std::endl;
+    ofs << "    }" << std::endl;
+    ofs << "    if(!rt->next()) {" << std::endl;
+    ofs << "        return nullptr;" << std::endl;
+    ofs << "    }" << std::endl;
+    ofs << "    " << GetAsClassName(class_name) << "::ptr v(new "
+        << GetAsClassName(class_name) << ");" << std::endl;
+    PARSE_OBJECT("    ");
+    ofs << "    return v;" << std::endl;
+    ofs << "}" << std::endl << std::endl;
+
+    for(auto& i : m_idxs) {
+        if(i->getDType() == Index::TYPE_UNIQ) {
+            ofs << "" << GetAsClassName(class_name) << "::ptr "
+                << GetAsClassName(class_name_dao) << "::Query";
+            std::string tmp = "by";
+            for(auto& c : i->getCols()) {
+                tmp += "_" + c;
+            }
+            ofs << GetAsClassName(tmp) << "(";
+            for(auto& c : i->getCols()) {
+                auto d = getCol(c);
+                ofs << " const " << d->getDTypeString() << "& "
+                    << GetAsVariable(d->getName()) << ", ";
+            }
+            ofs << m_queryclass << "::ptr conn) {" << std::endl;
+
+            ofs << "    std::string sql = \"select ";
+            is_first = true;
+            for(auto& i : m_cols) {
+                if(!is_first) {
+                    ofs << ", ";
+                }
+                ofs << i->getName();
+                is_first = false;
+            }
+            ofs << " from " << m_name << " where";
+            is_first = true;
+            for(auto& x : i->getCols()) {
+                if(!is_first) {
+                    ofs << " and";
+                }
+                ofs << " " << x << " = ?";
+                is_first = false;
+            }
+            ofs << "\";" << std::endl;
+            CHECK_STMT("nullptr");
+
+            idx = 1;
+            for(auto& x : i->getCols()) {
+                ofs << "    stmt->" << getCol(x)->getBindString() << "(" << idx << ", ";
+                ofs << GetAsVariable(x) << ");" << std::endl;
+                ++idx;
+            }
+            ofs << "    auto rt = stmt->query();" << std::endl;
+            ofs << "    if(!rt) {" << std::endl;
+            ofs << "        return nullptr;" << std::endl;
+            ofs << "    }" << std::endl;
+            ofs << "    if(!rt->next()) {" << std::endl;
+            ofs << "        return nullptr;" << std::endl;
+            ofs << "    }" << std::endl;
+            ofs << "    " << GetAsClassName(class_name) << "::ptr v(new "
+                << GetAsClassName(class_name) << ");" << std::endl;
+            PARSE_OBJECT("    ");
+            ofs << "    return v;" << std::endl;
+            ofs << "}" << std::endl << std::endl;
+        } else if(i->getDType() == Index::TYPE_INDEX) {
+            ofs << "int " << GetAsClassName(class_name_dao) << "::Query";
+            std::string tmp = "by";
+            for(auto& c : i->getCols()) {
+                tmp += "_" + c;
+            }
+            ofs << GetAsClassName(tmp) << "(";
+            ofs << "std::vector<" << GetAsClassName(class_name) << "::ptr>& results, ";
+            for(auto& c : i->getCols()) {
+                auto d = getCol(c);
+                ofs << " const " << d->getDTypeString() << "& "
+                    << GetAsVariable(d->getName()) << ", ";
+            }
+            ofs << m_queryclass << "::ptr conn) {" << std::endl;
+
+            ofs << "    std::string sql = \"select ";
+            is_first = true;
+            for(auto& i : m_cols) {
+                if(!is_first) {
+                    ofs << ", ";
+                }
+                ofs << i->getName();
+                is_first = false;
+            }
+            ofs << " from " << m_name << " where";
+            is_first = true;
+            for(auto& x : i->getCols()) {
+                if(!is_first) {
+                    ofs << " and";
+                }
+                ofs << " " << x << " = ?";
+                is_first = false;
+            }
+            ofs << "\";" << std::endl;
+            CHECK_STMT("conn->getErrno()");
+
+            idx = 1;
+            for(auto& x : i->getCols()) {
+                ofs << "    stmt->" << getCol(x)->getBindString() << "(" << idx << ", ";
+                ofs << GetAsVariable(x) << ");" << std::endl;
+                ++idx;
+            }
+            ofs << "    auto rt = stmt->query();" << std::endl;
+            ofs << "    if(!rt) {" << std::endl;
+            ofs << "        return 0;" << std::endl;
+            ofs << "    }" << std::endl;
+            ofs << "    while (rt->next()) {" << std::endl;
+            ofs << "        " << GetAsClassName(class_name) << "::ptr v(new "
+                << GetAsClassName(class_name) << ");" << std::endl;
+            PARSE_OBJECT("        ");
+            ofs << "        results.push_back(v);" << std::endl;
+            ofs << "    };" << std::endl;
+            ofs << "    return 0;" << std::endl;
+            ofs << "}" << std::endl << std::endl;
+        }
+    }
+
+    ofs << "int " << GetAsClassName(class_name_dao) << "::CreateTableSQLite3(" << m_dbclass << "::ptr conn) {" << std::endl;
+    ofs << "    return conn->execute(\"CREATE TABLE " << m_name << "(\"" << std::endl;
+    is_first = true;
+    bool has_auto_increment = false;
+    for(auto& i : m_cols) {
+        if(!is_first) {
+            ofs << ",\"" << std::endl;
+        }
+        ofs << "            \"" << i->getName() << " " << i->getSQLite3TypeString();
+        if(i->isAutoIncrement()) {
+            ofs << " PRIMARY KEY AUTOINCREMENT";
+            has_auto_increment = true;
+        } else {
+            ofs << " NOT NULL DEFAULT " << i->getSQLite3Default();
+        }
+        is_first = false;
+    }
+    if(!has_auto_increment) {
+        ofs << ", PRIMARY KEY(";
+        is_first = true;
+        for(auto& i : pks) {
+            if(!is_first) {
+                ofs << ", ";
+            }
+            ofs << i->getName();
+        }
+        ofs << ")";
+    }
+    ofs << ");\"" << std::endl;
+    for(auto& i : m_idxs) {
+        if(i->getDType() == Index::TYPE_PK) {
+            continue;
+        }
+        ofs << "            \"CREATE";
+        if(i->getDType() == Index::TYPE_UNIQ) {
+            ofs << " UNIQUE";
+        }
+        ofs << " INDEX " << m_name;
+        for(auto& x : i->getCols()) {
+            ofs << "_" << x;
+        }
+        ofs << " ON " << m_name
+            << "(";
+        is_first = true;
+        for(auto& x : i->getCols()) {
+            if(!is_first) {
+                ofs << ",";
+            }
+            ofs << x;
+            is_first = false;
+        }
+        ofs << ");\"" << std::endl;
+    }
+    ofs << "            );" << std::endl;
+    ofs << "}" << std::endl << std::endl;
+
+    ofs << "int " << GetAsClassName(class_name_dao) << "::CreateTableMySQL(" << m_dbclass << "::ptr conn) {" << std::endl;
+    ofs << "    return conn->execute(\"CREATE TABLE " << m_name << "(\"" << std::endl;
+    is_first = true;
+    for(auto& i : m_cols) {
+        if(!is_first) {
+            ofs << ",\"" << std::endl;
+        }
+        ofs << "            \"`" << i->getName() << "` " << i->getMySQLTypeString();
+        if(i->isAutoIncrement()) {
+            ofs << " AUTO_INCREMENT";
+            has_auto_increment = true;
+        } else {
+            ofs << " NOT NULL DEFAULT " << i->getSQLite3Default();
+        }
+
+        if(!i->getUpdate().empty()) {
+            ofs << " ON UPDATE " << i->getUpdate() << " ";
+        }
+        if(!i->getDesc().empty()) {
+            ofs << " COMMENT '" << i->getDesc() << "'";
+        }
+        is_first = false;
+    }
+    ofs << ",\"" << std::endl << "            \"PRIMARY KEY(";
+    is_first = true;
+    for(auto& i : pks) {
+        if(!is_first) {
+            ofs << ", ";
+        }
+        ofs << "`" << i->getName() << "`";
+    }
+    ofs << ")";
+    for(auto& i : m_idxs) {
+        if(i->getDType() == Index::TYPE_PK) {
+            continue;
+        }
+        ofs << ",\"" << std::endl;
+        if(i->getDType() == Index::TYPE_UNIQ) {
+            ofs << "            \"UNIQUE ";
+        } else {
+            ofs << "            \"";
+        }
+        ofs << "KEY `" << m_name;
+        for(auto& x : i->getCols()) {
+            ofs << "_" << x;
+        }
+        ofs << "` (";
+        is_first = true;
+        for(auto& x : i->getCols()) {
+            if(!is_first) {
+                ofs << ",";
+            }
+            ofs << "`" << x << "`";
+            is_first = false;
+        }
+        ofs << ")";
+    }
+    ofs << ")";
+    if(!m_desc.empty()) {
+        ofs << " COMMENT='" << m_desc << "'";
+    }
+    ofs << "\");" << std::endl;
+    ofs << "}";
+}
+
 
 }
 }
