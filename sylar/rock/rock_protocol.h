@@ -74,5 +74,64 @@ public:
 
 };
 
+// RockResponse 表示带有业务数据的响应，继承自 Response 和 RockBody
+class RockResponse : public Response, public RockBody {
+public:
+    typedef std::shared_ptr<RockResponse> ptr;
+
+    // 获取字符串描述（调试用）
+    virtual std::string toString() const override;
+
+    // 获取响应名称（通常用于日志或路由）
+    virtual const std::string& getName() const override;
+
+    // 获取响应类型标识，通常为固定整数
+    virtual int32_t getType() const override;
+
+    // 将响应序列化进 ByteArray，包含响应头字段和 body 字符串
+    virtual bool serializeToByteArray(ByteArray::ptr bytearray) override;
+
+    // 从 ByteArray 中读取响应内容
+    virtual bool parseFromByteArray(ByteArray::ptr bytearray) override;
+};
+
+class RockNotify : public Notify, public RockBody {
+public:
+    typedef std::shared_ptr<RockNotify> ptr;
+
+    virtual std::string toString() const override;
+    virtual const std::string& getName() const override;
+    virtual int32_t getType() const override;
+
+    virtual bool serializeToByteArray(ByteArray::ptr bytearray) override;
+    virtual bool parseFromByteArray(ByteArray::ptr bytearray) override;
+};
+
+static const uint8_t s_rock_magic[2] = {0xab, 0xcd};
+
+struct RockMsgHeader {
+    RockMsgHeader(); 
+
+    uint8_t magic[2]; // 魔数（Magic Number），用于标识这是一个合法的 ROCK 协议包
+                      // 例如可能设定为固定值：0xAB, 0xCD，用于接收端快速判断数据合法性
+    uint8_t version;  // 协议版本号，用于兼容升级和版本控制
+                      // 比如当前为版本 1，未来若有协议扩展可判断 version 决定解析逻辑
+    uint8_t flag;     // 标志位，通常用于控制压缩、加密、是否响应等
+                      // 可用位操作表示多个布尔信息（如 bit 0: 是否压缩, bit 1: 是否加密）
+    int32_t length;   // 整个消息体（含头部之后的字节数）的长度，单位为字节
+                      // 接收端可根据此字段决定读取多少数据构成完整消息
+};
+
+//RockMessageDecoder 是 ROCK 协议中消息的“编解码器”，负责网络通信过程中的消息序列化与反序列化，是连接「字节流」与「逻辑消息对象」的桥梁。
+class RockMessageDecoder : public MessageDecoder {
+public:
+    typedef std::shared_ptr<RockMessageDecoder> ptr;
+
+    // 解码函数：从 stream 中读取数据并解析成一个完整 Message（可能是请求或响应）
+    virtual Message::ptr parseFrom(Stream::ptr stream) override;
+    // 编码函数：将 msg 序列化后写入到 stream 中
+    virtual int32_t serializeTo(Stream::ptr stream, Message::ptr msg) override;
+};
+
 
 }
